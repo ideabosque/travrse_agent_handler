@@ -1,0 +1,192 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": true,
+  "definitions": {
+    "paramSchema": {
+      "additionalProperties": true,
+      "properties": {
+        "description": {
+          "type": "string"
+        },
+        "items": {
+          "$ref": "#/definitions/paramSchema"
+        },
+        "properties": {
+          "additionalProperties": {
+            "$ref": "#/definitions/paramSchema"
+          },
+          "type": "object"
+        },
+        "required": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "type": {
+          "enum": ["string", "number", "integer", "boolean", "object", "array"],
+          "type": "string"
+        }
+      },
+      "required": ["type"],
+      "type": "object"
+    },
+    "toolParameters": {
+      "additionalProperties": true,
+      "properties": {
+        "properties": {
+          "additionalProperties": {
+            "$ref": "#/definitions/paramSchema"
+          },
+          "type": "object"
+        },
+        "required": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "type": {
+          "const": "object"
+        }
+      },
+      "required": ["type", "properties", "required"],
+      "type": "object"
+    }
+  },
+  "properties": {
+    "api_url": {
+      "default": "https://api.travrse.ai/v1/dispatch",
+      "description": "The Travrse AI API endpoint URL.",
+      "type": "string"
+    },
+    "api_key": {
+      "description": "The Travrse AI API key (Bearer token).",
+      "type": "string"
+    },
+    "model": {
+      "default": "gpt-4o",
+      "description": "ID of the model that will generate the response (e.g. 'gpt-4o', 'gpt-4o-mini', 'claude-3-5-sonnet').",
+      "type": "string"
+    },
+    "response_format": {
+      "default": "text",
+      "description": "Response format type ('text', 'json_object', or 'json_schema').",
+      "enum": ["text", "json_object", "json_schema"],
+      "type": "string"
+    },
+    "stream_response": {
+      "default": true,
+      "description": "Enable streaming response.",
+      "type": "boolean"
+    },
+    "record_name": {
+      "default": "Standalone Execution",
+      "description": "Name for the execution record.",
+      "type": "string"
+    },
+    "record_type": {
+      "default": "standalone",
+      "description": "Type of execution record.",
+      "type": "string"
+    },
+    "record_metadata": {
+      "description": "Optional metadata for the execution record.",
+      "type": "object",
+      "additionalProperties": true
+    },
+    "output_variable": {
+      "default": "prompt_result",
+      "description": "Name of the output variable for the step result.",
+      "type": "string"
+    },
+    "step_name": {
+      "default": "Prompt 1",
+      "description": "Name of the step in the flow.",
+      "type": "string"
+    },
+    "record_mode": {
+      "default": "virtual",
+      "description": "Record mode (virtual or persistent).",
+      "enum": ["virtual", "persistent"],
+      "type": "string"
+    },
+    "flow_name": {
+      "default": "Agent Flow",
+      "description": "Name of the agent flow.",
+      "type": "string"
+    },
+    "flow_description": {
+      "default": "Flow with 1 step",
+      "description": "Description of the agent flow.",
+      "type": "string"
+    },
+    "flow_mode": {
+      "default": "virtual",
+      "description": "Flow mode (virtual or persistent).",
+      "enum": ["virtual", "persistent"],
+      "type": "string"
+    },
+    "runtime_tools": {
+      "description": "Optional runtime tools (external API integrations, custom functions, etc.).",
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "description": "Tool name.",
+            "type": "string"
+          },
+          "description": {
+            "description": "Tool description.",
+            "type": "string"
+          },
+          "tool_type": {
+            "description": "Type of tool (e.g., 'external', 'function').",
+            "enum": ["external", "function"],
+            "type": "string"
+          },
+          "parameters_schema": {
+            "$ref": "#/definitions/toolParameters"
+          },
+          "config": {
+            "additionalProperties": true,
+            "description": "Tool configuration (URL, method, headers, etc.).",
+            "properties": {
+              "url": {
+                "type": "string"
+              },
+              "method": {
+                "enum": ["GET", "POST", "PUT", "DELETE"],
+                "type": "string"
+              },
+              "headers": {
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "type": "object"
+              }
+            },
+            "type": "object"
+          }
+        },
+        "required": ["name", "description", "tool_type", "parameters_schema"],
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "max_tool_calls": {
+      "default": 5,
+      "description": "Maximum number of tool calls allowed.",
+      "type": "integer"
+    },
+    "tool_call_strategy": {
+      "default": "auto",
+      "description": "Strategy for tool calling ('auto', 'required', 'none').",
+      "enum": ["auto", "required", "none"],
+      "type": "string"
+    }
+  },
+  "required": ["api_key"],
+  "title": "Travrse AI Configuration Schema",
+  "type": "object"
+}
