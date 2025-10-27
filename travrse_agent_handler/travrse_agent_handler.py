@@ -7,7 +7,6 @@ __author__ = "bibow"
 import json
 import logging
 import threading
-import traceback
 import uuid
 from decimal import Decimal
 from queue import Queue
@@ -15,7 +14,6 @@ from typing import Any, Dict, List, Optional
 
 import pendulum
 import requests
-
 from ai_agent_handler import AIAgentEventHandler
 from silvaengine_utility import Utility
 
