@@ -121,7 +121,7 @@ class TravrseEventHandler(AIAgentEventHandler):
         step_config = {
             "user_prompt": user_prompt,
             "system_prompt": self.agent.get("instructions", ""),
-            "model": self.model_setting.get("model", "gpt-4o"),
+            "model": self.model_setting.get("model"),
             "response_format": self.output_format_type,
             "output_variable": self.model_setting.get(
                 "output_variable", "prompt_result"
@@ -301,7 +301,7 @@ class TravrseEventHandler(AIAgentEventHandler):
                 )
 
             timestamp = pendulum.now("UTC").int_timestamp
-            run_id = f"run-travrse-{self.model_setting.get('model', 'default')}-{timestamp}-{uuid.uuid4().hex[:8]}"
+            run_id = f"run-travrse-{self.model_setting['model']}-{timestamp}-{uuid.uuid4().hex[:8]}"
 
             response = self.invoke_model(
                 **{
@@ -377,7 +377,7 @@ class TravrseEventHandler(AIAgentEventHandler):
 
             # Set final output
             timestamp = pendulum.now("UTC").int_timestamp
-            message_id = f"msg-travrse-{self.model_setting.get('model', 'default')}-{timestamp}-{uuid.uuid4().hex[:8]}"
+            message_id = f"msg-travrse-{self.model_setting['model']}-{timestamp}-{uuid.uuid4().hex[:8]}"
 
             self.final_output = {
                 "message_id": message_id,
@@ -512,7 +512,7 @@ class TravrseEventHandler(AIAgentEventHandler):
                             index += 1
 
                             timestamp = pendulum.now("UTC").int_timestamp
-                            message_id = f"msg-travrse-{self.model_setting.get('model', 'default')}-{timestamp}-{uuid.uuid4().hex[:8]}"
+                            message_id = f"msg-travrse-{self.model_setting['model']}-{timestamp}-{uuid.uuid4().hex[:8]}"
 
                         # Print and accumulate text
                         print(text_chunk, end="", flush=True)
