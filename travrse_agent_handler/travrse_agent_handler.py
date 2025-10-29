@@ -14,6 +14,7 @@ from typing import Any, Dict, List, Optional
 
 import pendulum
 import requests
+
 from ai_agent_handler import AIAgentEventHandler
 from silvaengine_utility import Utility
 
@@ -104,20 +105,17 @@ class TravrseEventHandler(AIAgentEventHandler):
         Returns:
             Formatted payload for Travrse AI API
         """
-        # Assemble user_prompt from all input messages
-        # Format: role: content for each message
-        user_prompt_parts = []
+        # Build messages array from input messages
+        # Each message contains role and content fields for the Travrse AI API
+        messages = []
         for msg in input_messages:
-            role = msg.get("role", "")
-            content = msg.get("content", "")
-            if content:
-                user_prompt_parts.append(f"{role}: {content}")
-
-        user_prompt = "\n".join(user_prompt_parts) if user_prompt_parts else ""
+            messages.append(
+                {"role": msg.get("role", ""), "content": msg.get("content", "")}
+            )
 
         # Build the flow configuration
         step_config = {
-            "user_prompt": user_prompt,
+            "user_prompt": "{{user_message}}",
             "system_prompt": self.agent.get("instructions", ""),
             "model": self.model_setting.get("model"),
             "response_format": self.output_format_type,
@@ -155,6 +153,7 @@ class TravrseEventHandler(AIAgentEventHandler):
 
         payload = {
             "record": record,
+            "messages": messages,
             "flow": {
                 "name": self.model_setting.get("flow_name", "Agent Flow"),
                 "description": self.model_setting.get(
