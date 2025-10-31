@@ -416,11 +416,22 @@ class TravrseEventHandler(AIAgentEventHandler):
         - {"type":"step_complete","result":{"response":"..."}} - Step completion with full response
         - {"type":"flow_complete",...} - Flow completion metadata
 
+        Handles three scenarios:
+        1. Empty stream → Retry up to 5 times
+        2. Valid stream → Accumulate and set final_output
+        3. Stream end → Send completion signal
+
         Args:
             response: Streaming HTTP response
             input_messages: Current conversation history
             stream_event: Event to signal completion
             retry_count: Current retry count (max 5 retries)
+
+        Handles:
+            - Accumulating response text
+            - Processing JSON vs text formats
+            - Sending chunks to websocket
+            - Signaling completion
         """
         MAX_RETRIES = 5
         if retry_count > MAX_RETRIES:
@@ -429,8 +440,12 @@ class TravrseEventHandler(AIAgentEventHandler):
             raise Exception(error_msg)
 
         message_id = None
+        # Use list for efficient string concatenation (performance optimization)
         accumulated_text_parts = []
+        accumulated_partial_json = ""
+        accumulated_partial_text = ""
         received_any_content = False
+        # Use cached output format type (performance optimization)
         output_format = self.output_format_type
         index = 0
 
@@ -525,13 +540,25 @@ class TravrseEventHandler(AIAgentEventHandler):
                         print(text_chunk, end="", flush=True)
                         accumulated_text_parts.append(text_chunk)
 
-                        # Send to stream
-                        self.send_data_to_stream(
-                            index=index,
-                            data_format=output_format,
-                            chunk_delta=text_chunk,
-                        )
-                        index += 1
+                        # Process content based on output format
+                        if output_format in ["json_object", "json_schema"]:
+                            accumulated_partial_json += text_chunk
+                            # Temporarily build accumulated_text for processing
+                            temp_accumulated_text = "".join(accumulated_text_parts)
+                            index, temp_accumulated_text, accumulated_partial_json = (
+                                self.process_and_send_json(
+                                    index,
+                                    temp_accumulated_text,
+                                    accumulated_partial_json,
+                                    output_format,
+                                )
+                            )
+                        else:
+                            accumulated_partial_text += text_chunk
+                            # Check if text contains XML-style tags and update format
+                            index, accumulated_partial_text = self.process_text_content(
+                                index, accumulated_partial_text, output_format
+                            )
 
                     elif chunk_type == "step_complete":
                         # Step completed - may contain full response
@@ -601,13 +628,25 @@ class TravrseEventHandler(AIAgentEventHandler):
                             )
                     continue
 
+            # Send any remaining partial text
+            if len(accumulated_partial_text) > 0:
+                self.send_data_to_stream(
+                    index=index,
+                    data_format=output_format,
+                    chunk_delta=accumulated_partial_text,
+                )
+                accumulated_partial_text = ""
+                index += 1
+
             if self.logger.isEnabledFor(logging.DEBUG):
                 self.logger.debug(
                     f"[handle_stream] Finished reading stream. Total lines: {line_count}, Content received: {received_any_content}"
                 )
 
+            # Build final accumulated text from parts (performance optimization)
             final_accumulated_text = "".join(accumulated_text_parts)
 
+            # Scenario 1: Empty stream - retry
             if not received_any_content or not final_accumulated_text.strip():
                 self.logger.warning(
                     f"Received empty stream from model (lines: {line_count}, content: {received_any_content}), retrying (attempt {retry_count + 1}/{MAX_RETRIES})..."
@@ -620,9 +659,22 @@ class TravrseEventHandler(AIAgentEventHandler):
                 )
                 return
 
+            # Scenario 2: Valid stream - finalize
+            # Send final message end signal
+            self.send_data_to_stream(
+                index=index,
+                data_format=output_format,
+                is_message_end=True,
+            )
+
             # Build final output with metadata
             self.final_output = {
-                "message_id": message_id,
+                "message_id": (
+                    message_id
+                    if message_id
+                    # Optimized UUID generation
+                    else f"msg-{pendulum.now('UTC').int_timestamp}-{uuid.uuid4().hex[:8]}"
+                ),
                 "role": "assistant",
                 "content": final_accumulated_text,
             }
@@ -635,10 +687,8 @@ class TravrseEventHandler(AIAgentEventHandler):
             if flow_metadata:
                 self.final_output["flow_metadata"] = flow_metadata
 
-            self.send_data_to_stream(
-                index=index,
-                data_format=output_format,
-            )
+            # Store accumulated_text for backward compatibility
+            self.accumulated_text = final_accumulated_text
 
             if self._run is None:
                 self._short_term_memory.append(
@@ -655,5 +705,6 @@ class TravrseEventHandler(AIAgentEventHandler):
             self.logger.error(f"Error in handle_stream: {str(e)}")
             raise
         finally:
+            # Signal that streaming has finished
             if stream_event:
                 stream_event.set()
