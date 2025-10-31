@@ -462,7 +462,7 @@ class TravrseEventHandler(AIAgentEventHandler):
 
             if self.logger.isEnabledFor(logging.DEBUG):
                 self.logger.debug(
-                    f"[handle_stream] Starting to read streaming response"
+                    "[handle_stream] Starting to read streaming response"
                 )
 
             for line in response.iter_lines(decode_unicode=True, chunk_size=None):
