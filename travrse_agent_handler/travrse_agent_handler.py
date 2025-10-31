@@ -201,6 +201,11 @@ class TravrseEventHandler(AIAgentEventHandler):
         Raises:
             Exception: If model invocation fails
         """
+        # Initialize variables at function scope for exception handler
+        request_id = None
+        payload = None
+        stream = None
+
         try:
             invoke_start = pendulum.now("UTC")
 
@@ -261,33 +266,65 @@ class TravrseEventHandler(AIAgentEventHandler):
 
             # Make API request
             self.logger.info(f"[API_CALL:{request_id}] Sending request...")
+            request_start = pendulum.now("UTC")
+
             # stream parameter must match stream_response in payload for proper handling
             response = requests.post(
                 self.api_url,
                 headers=self.headers,
                 data=json.dumps(payload),
                 stream=stream,
+                timeout=120,  # 2 minute timeout
+            )
+
+            request_duration = (pendulum.now("UTC") - request_start).total_seconds() * 1000
+
+            # ===== API CALL TRACKING: Response Details =====
+            self.logger.info(
+                f"[API_CALL:{request_id}] Response received in {request_duration:.2f}ms | "
+                f"Status: {response.status_code} | "
+                f"Content-Type: {response.headers.get('content-type', 'unknown')}"
             )
 
             if response.status_code != 200:
                 error_text = response.text[:500] if response.text else "No error message"
                 self.logger.error(
-                    f"[invoke_model] API request failed with status {response.status_code}: {error_text}"
+                    f"[API_CALL:{request_id}] FAILED - API request failed | "
+                    f"Status: {response.status_code} | "
+                    f"Error: {error_text}"
                 )
+
+                # Try to parse error details
+                try:
+                    error_json = response.json()
+                    if "error" in error_json:
+                        self.logger.error(
+                            f"[API_CALL:{request_id}] Error details: {Utility.json_dumps(error_json['error'])}"
+                        )
+                except:
+                    pass
+
                 raise Exception(
                     f"API request failed with status {response.status_code}: {error_text}"
                 )
 
-            # Check response headers for debugging
+            # Validate response content type for streaming
+            content_type = response.headers.get("content-type", "")
+            if stream:
+                if "text/event-stream" not in content_type and "stream" not in content_type:
+                    self.logger.warning(
+                        f"[API_CALL:{request_id}] WARNING - Expected SSE stream but got content-type: {content_type}"
+                    )
+                else:
+                    self.logger.info(
+                        f"[API_CALL:{request_id}] SUCCESS - Valid streaming response (content-type: {content_type})"
+                    )
+
+            # Log response headers in debug mode
             if self.logger.isEnabledFor(logging.DEBUG):
                 self.logger.debug(
-                    f"[invoke_model] Response headers: {dict(response.headers)}"
+                    f"[API_CALL:{request_id}] Response headers: {dict(response.headers)}"
                 )
-                content_type = response.headers.get("content-type", "")
-                if stream and "text/event-stream" not in content_type:
-                    self.logger.warning(
-                        f"[invoke_model] Expected SSE stream but got content-type: {content_type}"
-                    )
 
             if self.enable_timeline_log and self.logger.isEnabledFor(logging.INFO):
                 invoke_end = pendulum.now("UTC")
@@ -297,11 +334,29 @@ class TravrseEventHandler(AIAgentEventHandler):
                     f"[TIMELINE] T+{elapsed:.2f}ms: API call returned (took {invoke_time:.2f}ms)"
                 )
 
+            # Store request_id on response object for correlation in handle_stream
+            response.request_id = request_id
+
+            self.logger.info(f"[API_CALL:{request_id}] SUCCESS - Request complete")
+
             return response
 
         except Exception as e:
-            if self.logger.isEnabledFor(logging.ERROR):
-                self.logger.error(f"Error invoking model: {str(e)}")
+            # Use variables from function scope
+            req_id = request_id if request_id else 'unknown'
+            self.logger.error(f"[API_CALL:{req_id}] FAILED - Error invoking model: {str(e)}")
+
+            # Log additional context if available
+            try:
+                if payload and isinstance(payload, dict):
+                    self.logger.error(
+                        f"[API_CALL:{req_id}] Request context - "
+                        f"Messages: {len(payload.get('messages', []))}, "
+                        f"Stream: {stream}"
+                    )
+            except Exception:
+                pass  # Don't fail on logging errors
+
             raise Exception(f"Failed to invoke model: {str(e)}")
 
     @Utility.performance_monitor.monitor_operation(operation_name="Travrse")
@@ -412,11 +467,15 @@ class TravrseEventHandler(AIAgentEventHandler):
             retry_count: Current retry count (max 5 retries)
         """
         MAX_RETRIES = 5
+
+        # Get request_id from response object for correlation
+        request_id = getattr(response, 'request_id', 'unknown')
+
         if retry_count > MAX_RETRIES:
             error_msg = (
                 f"Maximum retry limit ({MAX_RETRIES}) exceeded for empty responses"
             )
-            self.logger.error(error_msg)
+            self.logger.error(f"[API_CALL:{request_id}] {error_msg}")
             raise Exception(error_msg)
 
         try:
@@ -470,6 +529,8 @@ class TravrseEventHandler(AIAgentEventHandler):
         """
         Processes streaming model responses chunk by chunk from Travrse AI.
 
+        Tracks stream processing with request_id for correlation.
+
         Travrse AI streams JSON objects with different types:
         - {"type":"step_chunk","text":"..."} - Text chunks to accumulate
         - {"type":"step_complete","result":{"response":"..."}} - Step completion with full response
@@ -493,9 +554,19 @@ class TravrseEventHandler(AIAgentEventHandler):
             - Signaling completion
         """
         MAX_RETRIES = 5
+
+        # Get request_id from response object for correlation
+        request_id = getattr(response, 'request_id', 'unknown')
+        stream_start = pendulum.now("UTC")
+
+        # ===== API CALL TRACKING: Stream Processing Start =====
+        self.logger.info(
+            f"[API_CALL:{request_id}] Starting stream processing (attempt {retry_count + 1}/{MAX_RETRIES + 1})"
+        )
+
         if retry_count > MAX_RETRIES:
             error_msg = f"Maximum retry limit ({MAX_RETRIES}) exceeded"
-            self.logger.error(error_msg)
+            self.logger.error(f"[API_CALL:{request_id}] {error_msg}")
             raise Exception(error_msg)
 
         message_id = None
@@ -521,7 +592,7 @@ class TravrseEventHandler(AIAgentEventHandler):
 
             if self.logger.isEnabledFor(logging.DEBUG):
                 self.logger.debug(
-                    "[handle_stream] Starting to read streaming response"
+                    f"[API_CALL:{request_id}] Starting to read streaming response"
                 )
 
             for line in response.iter_lines(decode_unicode=True, chunk_size=None):
@@ -782,13 +853,19 @@ class TravrseEventHandler(AIAgentEventHandler):
                         f"Failed to send partial text to stream (client likely disconnected): {stream_err}"
                     )
 
+            # ===== API CALL TRACKING: Stream Reading Complete =====
+            stream_read_duration = (pendulum.now("UTC") - stream_start).total_seconds() * 1000
+            self.logger.info(
+                f"[API_CALL:{request_id}] Stream reading complete in {stream_read_duration:.2f}ms | "
+                f"Lines: {line_count}, Content: {received_any_content}, "
+                f"Chunks: {chunk_types_received}"
+            )
+
             if self.logger.isEnabledFor(logging.DEBUG):
                 self.logger.debug(
-                    f"[handle_stream] Finished reading stream. Total lines: {line_count}, Content received: {received_any_content}, Chunk types: {chunk_types_received}"
-                )
-            elif self.logger.isEnabledFor(logging.INFO):
-                self.logger.info(
-                    f"[handle_stream] Stream summary - Lines: {line_count}, Content: {received_any_content}, Chunks: {chunk_types_received}"
+                    f"[API_CALL:{request_id}] Detailed stream summary - "
+                    f"Lines: {line_count}, Content received: {received_any_content}, "
+                    f"Chunk types: {chunk_types_received}"
                 )
 
             # Build final accumulated text from parts (performance optimization)
@@ -879,6 +956,23 @@ class TravrseEventHandler(AIAgentEventHandler):
             # Store accumulated_text for backward compatibility
             self.accumulated_text = final_accumulated_text
 
+            # ===== API CALL TRACKING: Stream Complete Success =====
+            total_duration = (pendulum.now("UTC") - stream_start).total_seconds() * 1000
+            content_length = len(final_accumulated_text)
+            self.logger.info(
+                f"[API_CALL:{request_id}] SUCCESS - Stream processing complete | "
+                f"Total time: {total_duration:.2f}ms | "
+                f"Content length: {content_length} chars | "
+                f"Message ID: {self.final_output['message_id']}"
+            )
+
+            if flow_metadata:
+                self.logger.info(
+                    f"[API_CALL:{request_id}] Flow metadata - "
+                    f"Execution ID: {flow_metadata.get('execution_id')}, "
+                    f"Steps: {flow_metadata.get('successful_steps')}/{flow_metadata.get('total_steps')} successful"
+                )
+
             if self._run is None:
                 self._short_term_memory.append(
                     {
@@ -891,7 +985,7 @@ class TravrseEventHandler(AIAgentEventHandler):
                 )
 
         except Exception as e:
-            self.logger.error(f"Error in handle_stream: {str(e)}")
+            self.logger.error(f"[API_CALL:{request_id}] FAILED - Error in handle_stream: {str(e)}")
             raise
         finally:
             # Signal that streaming has finished
