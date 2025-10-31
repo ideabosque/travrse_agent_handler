@@ -450,12 +450,6 @@ class TravrseEventHandler(AIAgentEventHandler):
         index = 0
 
         try:
-            self.send_data_to_stream(
-                index=index,
-                data_format=output_format,
-            )
-            index += 1
-
             # Process streaming response - each line is a JSON object
             step_result = None
             flow_metadata = None
@@ -527,14 +521,14 @@ class TravrseEventHandler(AIAgentEventHandler):
                         received_any_content = True
 
                         if not message_id:
+                            timestamp = pendulum.now("UTC").int_timestamp
+                            message_id = f"msg-travrse-{self.model_setting['model']}-{timestamp}-{uuid.uuid4().hex[:8]}"
+
                             self.send_data_to_stream(
                                 index=index,
                                 data_format=output_format,
                             )
                             index += 1
-
-                            timestamp = pendulum.now("UTC").int_timestamp
-                            message_id = f"msg-travrse-{self.model_setting['model']}-{timestamp}-{uuid.uuid4().hex[:8]}"
 
                         # Print and accumulate text
                         print(text_chunk, end="", flush=True)
@@ -567,6 +561,24 @@ class TravrseEventHandler(AIAgentEventHandler):
                             self.logger.info(
                                 f"[handle_stream] Step '{chunk_data.get('name')}' completed successfully: {chunk_data.get('success')}"
                             )
+
+                        # Extract response from step_result if no chunks received
+                        if not received_any_content and step_result:
+                            output_var = self.model_setting.get("output_variable", "prompt_result")
+                            response_text = (
+                                step_result.get(output_var) or
+                                step_result.get("response") or
+                                step_result.get("output") or
+                                step_result.get("content") or
+                                step_result.get("text")
+                            )
+
+                            if response_text and isinstance(response_text, str) and response_text.strip():
+                                received_any_content = True
+                                if not message_id:
+                                    timestamp = pendulum.now("UTC").int_timestamp
+                                    message_id = f"msg-travrse-{self.model_setting['model']}-{timestamp}-{uuid.uuid4().hex[:8]}"
+                                accumulated_text_parts.append(response_text)
 
                     elif chunk_type == "flow_complete":
                         # Flow completed - contains execution metadata
@@ -646,8 +658,18 @@ class TravrseEventHandler(AIAgentEventHandler):
             # Build final accumulated text from parts (performance optimization)
             final_accumulated_text = "".join(accumulated_text_parts)
 
-            # Scenario 1: Empty stream - retry
+            # Scenario 1: Empty stream - retry or fail gracefully
             if not received_any_content or not final_accumulated_text.strip():
+                if retry_count >= MAX_RETRIES:
+                    # Set valid final_output to prevent assertion error
+                    timestamp = pendulum.now("UTC").int_timestamp
+                    self.final_output = {
+                        "message_id": message_id if message_id else f"msg-error-{timestamp}",
+                        "role": "assistant",
+                        "content": "Error: Maximum retry limit exceeded - empty stream from model",
+                    }
+                    return
+
                 self.logger.warning(
                     f"Received empty stream from model (lines: {line_count}, content: {received_any_content}), retrying (attempt {retry_count + 1}/{MAX_RETRIES})..."
                 )
