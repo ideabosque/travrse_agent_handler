@@ -450,17 +450,15 @@ class TravrseEventHandler(AIAgentEventHandler):
         index = 0
 
         try:
-            self.send_data_to_stream(
-                index=index,
-                data_format=output_format,
-            )
-            index += 1
+            # Don't send initial stream data until we have actual content
+            # Moved this after message_id is created to avoid early WebSocket failures
 
             # Process streaming response - each line is a JSON object
             step_result = None
             flow_metadata = None
             incomplete_line_buffer = ""  # Buffer for incomplete JSON lines
             line_count = 0
+            chunk_types_received = {}  # Track what types of chunks we receive
 
             if self.logger.isEnabledFor(logging.DEBUG):
                 self.logger.debug(
@@ -511,6 +509,9 @@ class TravrseEventHandler(AIAgentEventHandler):
                     incomplete_line_buffer = ""
                     chunk_type = chunk_data.get("type")
 
+                    # Track chunk types for debugging
+                    chunk_types_received[chunk_type] = chunk_types_received.get(chunk_type, 0) + 1
+
                     if self.logger.isEnabledFor(logging.DEBUG):
                         self.logger.debug(
                             f"[handle_stream] Received chunk type: {chunk_type}"
@@ -527,14 +528,22 @@ class TravrseEventHandler(AIAgentEventHandler):
                         received_any_content = True
 
                         if not message_id:
-                            self.send_data_to_stream(
-                                index=index,
-                                data_format=output_format,
-                            )
-                            index += 1
-
                             timestamp = pendulum.now("UTC").int_timestamp
                             message_id = f"msg-travrse-{self.model_setting['model']}-{timestamp}-{uuid.uuid4().hex[:8]}"
+
+                            # Send initial stream message now that we have actual content
+                            try:
+                                self.send_data_to_stream(
+                                    index=index,
+                                    data_format=output_format,
+                                )
+                                index += 1
+                            except Exception as stream_err:
+                                # Log but don't fail - client may have disconnected
+                                self.logger.warning(
+                                    f"Failed to send initial stream data (client likely disconnected): {stream_err}"
+                                )
+                                # Continue processing to build final_output even if client disconnected
 
                         # Print and accumulate text
                         print(text_chunk, end="", flush=True)
@@ -617,7 +626,7 @@ class TravrseEventHandler(AIAgentEventHandler):
                         incomplete_line_buffer = ""
                         if self.logger.isEnabledFor(logging.DEBUG):
                             self.logger.debug(
-                                f"[handle_stream] Skipping empty/whitespace line"
+                                "[handle_stream] Skipping empty/whitespace line"
                             )
                     else:
                         # Real JSON parsing error - log and skip
@@ -630,24 +639,69 @@ class TravrseEventHandler(AIAgentEventHandler):
 
             # Send any remaining partial text
             if len(accumulated_partial_text) > 0:
-                self.send_data_to_stream(
-                    index=index,
-                    data_format=output_format,
-                    chunk_delta=accumulated_partial_text,
-                )
-                accumulated_partial_text = ""
-                index += 1
+                try:
+                    self.send_data_to_stream(
+                        index=index,
+                        data_format=output_format,
+                        chunk_delta=accumulated_partial_text,
+                    )
+                    accumulated_partial_text = ""
+                    index += 1
+                except Exception as stream_err:
+                    self.logger.warning(
+                        f"Failed to send partial text to stream (client likely disconnected): {stream_err}"
+                    )
 
             if self.logger.isEnabledFor(logging.DEBUG):
                 self.logger.debug(
-                    f"[handle_stream] Finished reading stream. Total lines: {line_count}, Content received: {received_any_content}"
+                    f"[handle_stream] Finished reading stream. Total lines: {line_count}, Content received: {received_any_content}, Chunk types: {chunk_types_received}"
+                )
+            elif self.logger.isEnabledFor(logging.INFO):
+                self.logger.info(
+                    f"[handle_stream] Stream summary - Lines: {line_count}, Content: {received_any_content}, Chunks: {chunk_types_received}"
                 )
 
             # Build final accumulated text from parts (performance optimization)
             final_accumulated_text = "".join(accumulated_text_parts)
 
-            # Scenario 1: Empty stream - retry
+            # Scenario 1: Empty stream - retry or fail gracefully
             if not received_any_content or not final_accumulated_text.strip():
+                if retry_count >= MAX_RETRIES:
+                    # Max retries exceeded - set error message in final_output
+                    error_msg = f"Maximum retry limit ({MAX_RETRIES}) exceeded - received empty stream"
+                    self.logger.error(error_msg)
+
+                    # Ensure final_output has valid structure even on failure
+                    timestamp = pendulum.now("UTC").int_timestamp
+                    self.final_output = {
+                        "message_id": (
+                            message_id
+                            if message_id
+                            else f"msg-error-{timestamp}-{uuid.uuid4().hex[:8]}"
+                        ),
+                        "role": "assistant",
+                        "content": f"Error: {error_msg}. The model did not return any content after {MAX_RETRIES} attempts.",
+                    }
+
+                    # Send error message to stream if possible
+                    try:
+                        self.send_data_to_stream(
+                            index=index,
+                            data_format=output_format,
+                            chunk_delta=self.final_output["content"],
+                        )
+                        index += 1
+                        self.send_data_to_stream(
+                            index=index,
+                            data_format=output_format,
+                            is_message_end=True,
+                        )
+                    except Exception as stream_err:
+                        self.logger.warning(
+                            f"Failed to send error message to stream: {stream_err}"
+                        )
+                    return
+
                 self.logger.warning(
                     f"Received empty stream from model (lines: {line_count}, content: {received_any_content}), retrying (attempt {retry_count + 1}/{MAX_RETRIES})..."
                 )
@@ -661,11 +715,16 @@ class TravrseEventHandler(AIAgentEventHandler):
 
             # Scenario 2: Valid stream - finalize
             # Send final message end signal
-            self.send_data_to_stream(
-                index=index,
-                data_format=output_format,
-                is_message_end=True,
-            )
+            try:
+                self.send_data_to_stream(
+                    index=index,
+                    data_format=output_format,
+                    is_message_end=True,
+                )
+            except Exception as stream_err:
+                self.logger.warning(
+                    f"Failed to send final message end signal (client likely disconnected): {stream_err}"
+                )
 
             # Build final output with metadata
             self.final_output = {
