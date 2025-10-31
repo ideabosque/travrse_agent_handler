@@ -351,11 +351,11 @@ class TravrseEventHandler(AIAgentEventHandler):
         Args:
             response: HTTP response object
             input_messages: Current conversation history
-            retry_count: Current retry count (max 5 retries)
+            retry_count: Current retry count (max 3 retries)
         """
-        MAX_RETRIES = 5
+        MAX_RETRIES = 3
 
-        if retry_count > MAX_RETRIES:
+        if retry_count >= MAX_RETRIES:
             error_msg = f"Maximum retry limit ({MAX_RETRIES}) exceeded for empty responses"
             self.logger.error(error_msg)
             raise Exception(error_msg)
@@ -409,7 +409,7 @@ class TravrseEventHandler(AIAgentEventHandler):
         - {"type":"flow_complete",...} - Flow completion metadata
 
         Handles three scenarios:
-        1. Empty stream → Retry up to 5 times
+        1. Empty stream → Retry up to 3 times
         2. Valid stream → Accumulate and set final_output
         3. Stream end → Send completion signal
 
@@ -417,7 +417,7 @@ class TravrseEventHandler(AIAgentEventHandler):
             response: Streaming HTTP response
             input_messages: Current conversation history
             stream_event: Event to signal completion
-            retry_count: Current retry count (max 5 retries)
+            retry_count: Current retry count (max 3 retries)
 
         Handles:
             - Accumulating response text
@@ -425,12 +425,7 @@ class TravrseEventHandler(AIAgentEventHandler):
             - Sending chunks to websocket
             - Signaling completion
         """
-        MAX_RETRIES = 5
-
-        if retry_count > MAX_RETRIES:
-            error_msg = f"Maximum retry limit ({MAX_RETRIES}) exceeded"
-            self.logger.error(error_msg)
-            raise Exception(error_msg)
+        MAX_RETRIES = 3
 
         message_id = None
         # Use list for efficient string concatenation (performance optimization)
@@ -588,10 +583,25 @@ class TravrseEventHandler(AIAgentEventHandler):
                 if retry_count >= MAX_RETRIES:
                     # Set valid final_output to prevent assertion error
                     timestamp = pendulum.now("UTC").int_timestamp
+                    error_content = "Error: Maximum retry limit exceeded - empty stream from model"
+
+                    # Send stream notification to user
+                    self.send_data_to_stream(
+                        index=0,
+                        data_format=self.output_format_type,
+                        chunk_delta=error_content,
+                    )
+
+                    self.send_data_to_stream(
+                        index=1,
+                        data_format=self.output_format_type,
+                        is_message_end=True,
+                    )
+
                     self.final_output = {
                         "message_id": message_id if message_id else f"msg-error-{timestamp}",
                         "role": "assistant",
-                        "content": "Error: Maximum retry limit exceeded - empty stream from model",
+                        "content": error_content,
                     }
                     return
 
