@@ -124,6 +124,10 @@ class TravrseEventHandler(AIAgentEventHandler):
             ),
         }
 
+        step_config["tools"] = {}
+        if "tool_ids" in self.model_setting:
+            step_config["tools"]["tool_ids"] = self.model_setting["tool_ids"]
+
         # Add tools if available - matching example.py structure
         runtime_tools = []
         if "tools" in self.model_setting:
@@ -133,13 +137,16 @@ class TravrseEventHandler(AIAgentEventHandler):
                 url = tool["config"]["url"]
                 tool["config"]["url"] = url.format(endpoint_id=self.endpoint_id)
                 runtime_tools.append(tool)
-            step_config["tools"] = {
-                "runtime_tools": runtime_tools,
-                "max_tool_calls": self.model_setting.get("max_tool_calls", 5),
-                "tool_call_strategy": self.model_setting.get(
-                    "tool_call_strategy", "auto"
-                ),
-            }
+            step_config["tools"] = dict(
+                step_config["tools"],
+                **{
+                    "runtime_tools": runtime_tools,
+                    "max_tool_calls": self.model_setting.get("max_tool_calls", 5),
+                    "tool_call_strategy": self.model_setting.get(
+                        "tool_call_strategy", "auto"
+                    ),
+                },
+            )
 
         # Build record section - matching example.py
         record = {
@@ -199,6 +206,7 @@ class TravrseEventHandler(AIAgentEventHandler):
 
             # Build Travrse AI payload
             payload = self._build_travrse_payload(input_messages)
+            print(payload)
             payload["options"]["stream_response"] = stream
 
             if self.logger.isEnabledFor(logging.DEBUG):

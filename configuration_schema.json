@@ -184,6 +184,51 @@
       "description": "Strategy for tool calling ('auto', 'required', 'none').",
       "enum": ["auto", "required", "none"],
       "type": "string"
+    },
+    "mcp_proxy": {
+      "description": "MCP proxy configuration for external tool integrations.",
+      "type": "object",
+      "properties": {
+        "base_url": {
+          "type": "string",
+          "description": "Base URL for the MCP proxy endpoint."
+        },
+        "headers": {
+          "type": "object",
+          "description": "HTTP headers for MCP proxy requests.",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "properties": {
+            "Accept": {
+              "type": "string",
+              "description": "Accept header value.",
+              "default": "application/json"
+            },
+            "x-api-key": {
+              "type": "string",
+              "description": "API key for MCP proxy authentication."
+            }
+          }
+        }
+      },
+      "required": ["base_url", "headers"]
+    },
+    "tool_ids": {
+      "description": "Array of built-in tool IDs to enable (e.g., 'builtin:anthropic_web_search').",
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "default": []
+    },
+    "enabled_tools": {
+      "description": "Array of enabled tool names from the MCP proxy.",
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "default": []
     }
   },
   "required": ["api_key"],
