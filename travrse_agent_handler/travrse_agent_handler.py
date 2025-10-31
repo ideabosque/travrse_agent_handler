@@ -211,9 +211,19 @@ class TravrseEventHandler(AIAgentEventHandler):
             payload = self._build_travrse_payload(input_messages)
             payload["options"]["stream_response"] = stream
 
+            # Validate payload has required fields
+            if not payload.get("messages"):
+                self.logger.warning("[invoke_model] No messages in payload")
+            elif not any(msg.get("content") for msg in payload.get("messages", [])):
+                self.logger.warning("[invoke_model] All messages have empty content")
+
             if self.logger.isEnabledFor(logging.DEBUG):
                 self.logger.debug(
                     f"[invoke_model] Payload: {Utility.json_dumps(payload)}"
+                )
+            elif self.logger.isEnabledFor(logging.INFO):
+                self.logger.info(
+                    f"[invoke_model] Sending {len(payload.get('messages', []))} messages, stream={stream}"
                 )
 
             # Make API request
@@ -226,9 +236,24 @@ class TravrseEventHandler(AIAgentEventHandler):
             )
 
             if response.status_code != 200:
-                raise Exception(
-                    f"API request failed with status {response.status_code}: {response.text}"
+                error_text = response.text[:500] if response.text else "No error message"
+                self.logger.error(
+                    f"[invoke_model] API request failed with status {response.status_code}: {error_text}"
                 )
+                raise Exception(
+                    f"API request failed with status {response.status_code}: {error_text}"
+                )
+
+            # Check response headers for debugging
+            if self.logger.isEnabledFor(logging.DEBUG):
+                self.logger.debug(
+                    f"[invoke_model] Response headers: {dict(response.headers)}"
+                )
+                content_type = response.headers.get("content-type", "")
+                if stream and "text/event-stream" not in content_type:
+                    self.logger.warning(
+                        f"[invoke_model] Expected SSE stream but got content-type: {content_type}"
+                    )
 
             if self.enable_timeline_log and self.logger.isEnabledFor(logging.INFO):
                 invoke_end = pendulum.now("UTC")
@@ -572,10 +597,81 @@ class TravrseEventHandler(AIAgentEventHandler):
                     elif chunk_type == "step_complete":
                         # Step completed - may contain full response
                         step_result = chunk_data.get("result", {})
+                        step_success = chunk_data.get("success", False)
+                        step_name = chunk_data.get("name", "Unknown")
+                        step_error = chunk_data.get("error")
+
                         if self.logger.isEnabledFor(logging.INFO):
                             self.logger.info(
-                                f"[handle_stream] Step '{chunk_data.get('name')}' completed successfully: {chunk_data.get('success')}"
+                                f"[handle_stream] Step '{step_name}' completed successfully: {step_success}"
                             )
+
+                        # Check for step-level errors
+                        if not step_success or step_error:
+                            error_msg = step_error or "Step failed without error message"
+                            self.logger.error(
+                                f"[handle_stream] Step '{step_name}' failed: {error_msg}"
+                            )
+                            # Log full chunk_data for debugging
+                            if self.logger.isEnabledFor(logging.DEBUG):
+                                self.logger.debug(
+                                    f"[handle_stream] Failed step data: {Utility.json_dumps(chunk_data)}"
+                                )
+
+                        # IMPORTANT: If no chunks received yet, check if response is in step_result
+                        # Some models/configurations return the full response here instead of streaming
+                        if not received_any_content and step_result:
+                            if self.logger.isEnabledFor(logging.DEBUG):
+                                self.logger.debug(
+                                    f"[handle_stream] No chunks received yet. step_result keys: {list(step_result.keys())}"
+                                )
+
+                            # Try to extract response from step_result
+                            # Common fields: 'response', 'output', 'content', 'text', output_variable name
+                            response_text = None
+                            output_var = self.model_setting.get("output_variable", "prompt_result")
+
+                            # Check various possible locations for the response
+                            if output_var in step_result:
+                                response_text = step_result.get(output_var)
+                            elif "response" in step_result:
+                                response_text = step_result.get("response")
+                            elif "output" in step_result:
+                                response_text = step_result.get("output")
+                            elif "content" in step_result:
+                                response_text = step_result.get("content")
+                            elif "text" in step_result:
+                                response_text = step_result.get("text")
+
+                            if response_text and isinstance(response_text, str) and response_text.strip():
+                                self.logger.info(
+                                    f"[handle_stream] Found response in step_result (length: {len(response_text)})"
+                                )
+                                received_any_content = True
+
+                                if not message_id:
+                                    timestamp = pendulum.now("UTC").int_timestamp
+                                    message_id = f"msg-travrse-{self.model_setting['model']}-{timestamp}-{uuid.uuid4().hex[:8]}"
+
+                                # Accumulate the response
+                                accumulated_text_parts.append(response_text)
+
+                                # Send to stream if possible
+                                try:
+                                    self.send_data_to_stream(
+                                        index=index,
+                                        data_format=output_format,
+                                        chunk_delta=response_text,
+                                    )
+                                    index += 1
+                                except Exception as stream_err:
+                                    self.logger.warning(
+                                        f"Failed to send step_result content to stream: {stream_err}"
+                                    )
+                            else:
+                                self.logger.warning(
+                                    f"[handle_stream] step_result present but no recognizable response found. Keys: {list(step_result.keys())}"
+                                )
 
                     elif chunk_type == "flow_complete":
                         # Flow completed - contains execution metadata
