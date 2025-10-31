@@ -124,6 +124,9 @@ class TravrseEventHandler(AIAgentEventHandler):
             ),
         }
 
+        if "temperature" in self.model_setting:
+            step_config["temperature"] = float(self.model_setting["temperature"])
+
         step_config["tools"] = {}
         if "tool_ids" in self.model_setting:
             step_config["tools"]["tool_ids"] = self.model_setting["tool_ids"]
@@ -206,12 +209,11 @@ class TravrseEventHandler(AIAgentEventHandler):
 
             # Build Travrse AI payload
             payload = self._build_travrse_payload(input_messages)
-            print(payload)
             payload["options"]["stream_response"] = stream
 
-            if self.logger.isEnabledFor(logging.DEBUG):
-                self.logger.debug(
-                    f"[invoke_model] Payload: {json.dumps(payload, indent=2)}"
+            if self.logger.isEnabledFor(logging.INFO):
+                self.logger.info(
+                    f"[invoke_model] Payload: {Utility.json_dumps(payload)}"
                 )
 
             # Make API request
