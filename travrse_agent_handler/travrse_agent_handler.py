@@ -202,7 +202,6 @@ class TravrseEventHandler(AIAgentEventHandler):
             Exception: If model invocation fails
         """
         # Initialize variables at function scope for exception handler
-        request_id = None
         payload = None
         stream = None
 
@@ -216,57 +215,7 @@ class TravrseEventHandler(AIAgentEventHandler):
             payload = self._build_travrse_payload(input_messages)
             payload["options"]["stream_response"] = stream
 
-            # Generate unique request ID for tracking
-            request_id = f"req-{uuid.uuid4().hex[:12]}"
-
-            # ===== API CALL TRACKING: Request Details =====
-            self.logger.info(
-                f"[API_CALL] Request ID: {request_id} | "
-                f"URL: {self.api_url} | "
-                f"Stream: {stream} | "
-                f"Model: {payload['flow']['steps'][0]['config'].get('model')}"
-            )
-
-            # Validate payload has required fields
-            if not payload.get("messages"):
-                self.logger.warning(f"[API_CALL:{request_id}] No messages in payload")
-            elif not any(msg.get("content") for msg in payload.get("messages", [])):
-                self.logger.warning(f"[API_CALL:{request_id}] All messages have empty content")
-
-            # Log message summary
-            message_summary = []
-            for i, msg in enumerate(payload.get("messages", [])):
-                role = msg.get("role", "unknown")
-                content_length = len(msg.get("content", ""))
-                message_summary.append(f"{role}:{content_length}chars")
-
-            self.logger.info(
-                f"[API_CALL:{request_id}] Messages: [{', '.join(message_summary)}]"
-            )
-
-            # Log tools configuration
-            step_config = payload['flow']['steps'][0]['config']
-            if "tools" in step_config and step_config["tools"]:
-                tool_ids = step_config["tools"].get("tool_ids", [])
-                runtime_tools = step_config["tools"].get("runtime_tools", [])
-                runtime_tool_names = [t.get("name", "unknown") for t in runtime_tools]
-
-                self.logger.info(
-                    f"[API_CALL:{request_id}] Tools - "
-                    f"Built-in IDs: {tool_ids}, "
-                    f"Runtime: {runtime_tool_names}, "
-                    f"Max calls: {step_config['tools'].get('max_tool_calls', 0)}, "
-                    f"Strategy: {step_config['tools'].get('tool_call_strategy', 'auto')}"
-                )
-
-            if self.logger.isEnabledFor(logging.DEBUG):
-                self.logger.debug(
-                    f"[API_CALL:{request_id}] Full payload: {Utility.json_dumps(payload)}"
-                )
-
             # Make API request
-            self.logger.info(f"[API_CALL:{request_id}] Sending request...")
-            request_start = pendulum.now("UTC")
 
             # stream parameter must match stream_response in payload for proper handling
             response = requests.post(
@@ -277,53 +226,10 @@ class TravrseEventHandler(AIAgentEventHandler):
                 timeout=120,  # 2 minute timeout
             )
 
-            request_duration = (pendulum.now("UTC") - request_start).total_seconds() * 1000
-
-            # ===== API CALL TRACKING: Response Details =====
-            self.logger.info(
-                f"[API_CALL:{request_id}] Response received in {request_duration:.2f}ms | "
-                f"Status: {response.status_code} | "
-                f"Content-Type: {response.headers.get('content-type', 'unknown')}"
-            )
-
             if response.status_code != 200:
                 error_text = response.text[:500] if response.text else "No error message"
-                self.logger.error(
-                    f"[API_CALL:{request_id}] FAILED - API request failed | "
-                    f"Status: {response.status_code} | "
-                    f"Error: {error_text}"
-                )
-
-                # Try to parse error details
-                try:
-                    error_json = response.json()
-                    if "error" in error_json:
-                        self.logger.error(
-                            f"[API_CALL:{request_id}] Error details: {Utility.json_dumps(error_json['error'])}"
-                        )
-                except:
-                    pass
-
                 raise Exception(
                     f"API request failed with status {response.status_code}: {error_text}"
-                )
-
-            # Validate response content type for streaming
-            content_type = response.headers.get("content-type", "")
-            if stream:
-                if "text/event-stream" not in content_type and "stream" not in content_type:
-                    self.logger.warning(
-                        f"[API_CALL:{request_id}] WARNING - Expected SSE stream but got content-type: {content_type}"
-                    )
-                else:
-                    self.logger.info(
-                        f"[API_CALL:{request_id}] SUCCESS - Valid streaming response (content-type: {content_type})"
-                    )
-
-            # Log response headers in debug mode
-            if self.logger.isEnabledFor(logging.DEBUG):
-                self.logger.debug(
-                    f"[API_CALL:{request_id}] Response headers: {dict(response.headers)}"
                 )
 
             if self.enable_timeline_log and self.logger.isEnabledFor(logging.INFO):
@@ -334,29 +240,10 @@ class TravrseEventHandler(AIAgentEventHandler):
                     f"[TIMELINE] T+{elapsed:.2f}ms: API call returned (took {invoke_time:.2f}ms)"
                 )
 
-            # Store request_id on response object for correlation in handle_stream
-            response.request_id = request_id
-
-            self.logger.info(f"[API_CALL:{request_id}] SUCCESS - Request complete")
-
             return response
 
         except Exception as e:
-            # Use variables from function scope
-            req_id = request_id if request_id else 'unknown'
-            self.logger.error(f"[API_CALL:{req_id}] FAILED - Error invoking model: {str(e)}")
-
-            # Log additional context if available
-            try:
-                if payload and isinstance(payload, dict):
-                    self.logger.error(
-                        f"[API_CALL:{req_id}] Request context - "
-                        f"Messages: {len(payload.get('messages', []))}, "
-                        f"Stream: {stream}"
-                    )
-            except Exception:
-                pass  # Don't fail on logging errors
-
+            self.logger.error(f"Error invoking model: {str(e)}")
             raise Exception(f"Failed to invoke model: {str(e)}")
 
     @Utility.performance_monitor.monitor_operation(operation_name="Travrse")
@@ -468,24 +355,14 @@ class TravrseEventHandler(AIAgentEventHandler):
         """
         MAX_RETRIES = 5
 
-        # Get request_id from response object for correlation
-        request_id = getattr(response, 'request_id', 'unknown')
-
         if retry_count > MAX_RETRIES:
-            error_msg = (
-                f"Maximum retry limit ({MAX_RETRIES}) exceeded for empty responses"
-            )
-            self.logger.error(f"[API_CALL:{request_id}] {error_msg}")
+            error_msg = f"Maximum retry limit ({MAX_RETRIES}) exceeded for empty responses"
+            self.logger.error(error_msg)
             raise Exception(error_msg)
 
         try:
             # Travrse AI returns plain text response directly
             response_text = response.text
-
-            if self.logger.isEnabledFor(logging.DEBUG):
-                self.logger.debug(
-                    f"[handle_response] Raw response: {response_text[:200]}..."
-                )
 
             # Parse response
             if not response_text or not response_text.strip():
@@ -509,11 +386,6 @@ class TravrseEventHandler(AIAgentEventHandler):
                 "role": "assistant",
                 "content": response_text,
             }
-
-            if self.logger.isEnabledFor(logging.INFO):
-                self.logger.info(
-                    f"[handle_response] Final output set with {len(response_text)} chars"
-                )
 
         except Exception as e:
             self.logger.error(f"Error in handle_response: {str(e)}")
@@ -555,18 +427,9 @@ class TravrseEventHandler(AIAgentEventHandler):
         """
         MAX_RETRIES = 5
 
-        # Get request_id from response object for correlation
-        request_id = getattr(response, 'request_id', 'unknown')
-        stream_start = pendulum.now("UTC")
-
-        # ===== API CALL TRACKING: Stream Processing Start =====
-        self.logger.info(
-            f"[API_CALL:{request_id}] Starting stream processing (attempt {retry_count + 1}/{MAX_RETRIES + 1})"
-        )
-
         if retry_count > MAX_RETRIES:
             error_msg = f"Maximum retry limit ({MAX_RETRIES}) exceeded"
-            self.logger.error(f"[API_CALL:{request_id}] {error_msg}")
+            self.logger.error(error_msg)
             raise Exception(error_msg)
 
         message_id = None
@@ -585,20 +448,10 @@ class TravrseEventHandler(AIAgentEventHandler):
             flow_metadata = None
             incomplete_line_buffer = ""  # Buffer for incomplete JSON lines
             line_count = 0
-            chunk_types_received = {}  # Track what types of chunks we receive
-
-            if self.logger.isEnabledFor(logging.DEBUG):
-                self.logger.debug(
-                    f"[API_CALL:{request_id}] Starting to read streaming response"
-                )
 
             for line in response.iter_lines(decode_unicode=True, chunk_size=None):
                 line_count += 1
                 if not line:
-                    if self.logger.isEnabledFor(logging.DEBUG):
-                        self.logger.debug(
-                            f"[handle_stream] Line {line_count}: Empty (None)"
-                        )
                     continue
 
                 # iter_lines with decode_unicode=True returns strings, not bytes
@@ -607,11 +460,6 @@ class TravrseEventHandler(AIAgentEventHandler):
                     if isinstance(line, str)
                     else line.decode("utf-8").strip()
                 )
-
-                if self.logger.isEnabledFor(logging.DEBUG):
-                    self.logger.debug(
-                        f"[handle_stream] Line {line_count}: '{line_str[:100]}...' (len={len(line_str)})"
-                    )
 
                 # Skip empty lines
                 if not line_str:
@@ -635,14 +483,6 @@ class TravrseEventHandler(AIAgentEventHandler):
                     # Success - clear the buffer
                     incomplete_line_buffer = ""
                     chunk_type = chunk_data.get("type")
-
-                    # Track chunk types for debugging
-                    chunk_types_received[chunk_type] = chunk_types_received.get(chunk_type, 0) + 1
-
-                    if self.logger.isEnabledFor(logging.DEBUG):
-                        self.logger.debug(
-                            f"[handle_stream] Received chunk type: {chunk_type}"
-                        )
 
                     # Handle different chunk types
                     if chunk_type == "step_chunk":
@@ -691,14 +531,6 @@ class TravrseEventHandler(AIAgentEventHandler):
                     elif chunk_type == "step_complete":
                         # Step completed - may contain full response
                         step_result = chunk_data.get("result", {})
-                        step_success = chunk_data.get("success", False)
-                        step_name = chunk_data.get("name", "Unknown")
-                        step_error = chunk_data.get("error")
-
-                        if self.logger.isEnabledFor(logging.INFO):
-                            self.logger.info(
-                                f"[handle_stream] Step '{step_name}' completed successfully: {step_success}"
-                            )
 
                         # Extract response from step_result if no chunks received
                     elif chunk_type == "flow_complete":
@@ -712,17 +544,6 @@ class TravrseEventHandler(AIAgentEventHandler):
                             "successful_steps": chunk_data.get("successfulSteps"),
                             "failed_steps": chunk_data.get("failedSteps"),
                         }
-                        if self.logger.isEnabledFor(logging.INFO):
-                            self.logger.info(
-                                f"[handle_stream] Flow '{flow_metadata['flow_name']}' completed in {flow_metadata['execution_time']}ms"
-                            )
-
-                    else:
-                        # Log unknown chunk types for debugging
-                        if self.logger.isEnabledFor(logging.DEBUG):
-                            self.logger.debug(
-                                f"[handle_stream] Unknown chunk type: {chunk_type}"
-                            )
 
                 except json.JSONDecodeError as e:
                     # Handle incomplete JSON - might be truncated across multiple lines
@@ -740,25 +561,13 @@ class TravrseEventHandler(AIAgentEventHandler):
                     ):
                         # Likely incomplete - buffer it and wait for next line
                         incomplete_line_buffer = full_line
-                        if self.logger.isEnabledFor(logging.DEBUG):
-                            self.logger.debug(
-                                f"[handle_stream] Buffering incomplete JSON line (length: {len(full_line)})"
-                            )
                         continue
                     elif "Expecting value" in error_msg and "char 0" in error_msg:
                         # Empty line - already handled above, but just in case
                         incomplete_line_buffer = ""
-                        if self.logger.isEnabledFor(logging.DEBUG):
-                            self.logger.debug(
-                                "[handle_stream] Skipping empty/whitespace line"
-                            )
                     else:
-                        # Real JSON parsing error - log and skip
+                        # Real JSON parsing error - skip
                         incomplete_line_buffer = ""
-                        if self.logger.isEnabledFor(logging.WARNING):
-                            self.logger.warning(
-                                f"[handle_stream] Failed to parse JSON: {full_line[:200]} - Error: {e}"
-                            )
                     continue
 
             # Send any remaining partial text
@@ -770,13 +579,6 @@ class TravrseEventHandler(AIAgentEventHandler):
                 )
                 accumulated_partial_text = ""
                 index += 1
-
-            if self.logger.isEnabledFor(logging.DEBUG):
-                self.logger.debug(
-                    f"[API_CALL:{request_id}] Detailed stream summary - "
-                    f"Lines: {line_count}, Content received: {received_any_content}, "
-                    f"Chunk types: {chunk_types_received}"
-                )
 
             # Build final accumulated text from parts (performance optimization)
             final_accumulated_text = "".join(accumulated_text_parts)
@@ -835,23 +637,6 @@ class TravrseEventHandler(AIAgentEventHandler):
             # Store accumulated_text for backward compatibility
             self.accumulated_text = final_accumulated_text
 
-            # ===== API CALL TRACKING: Stream Complete Success =====
-            total_duration = (pendulum.now("UTC") - stream_start).total_seconds() * 1000
-            content_length = len(final_accumulated_text)
-            self.logger.info(
-                f"[API_CALL:{request_id}] SUCCESS - Stream processing complete | "
-                f"Total time: {total_duration:.2f}ms | "
-                f"Content length: {content_length} chars | "
-                f"Message ID: {self.final_output['message_id']}"
-            )
-
-            if flow_metadata:
-                self.logger.info(
-                    f"[API_CALL:{request_id}] Flow metadata - "
-                    f"Execution ID: {flow_metadata.get('execution_id')}, "
-                    f"Steps: {flow_metadata.get('successful_steps')}/{flow_metadata.get('total_steps')} successful"
-                )
-
             if self._run is None:
                 self._short_term_memory.append(
                     {
@@ -864,7 +649,7 @@ class TravrseEventHandler(AIAgentEventHandler):
                 )
 
         except Exception as e:
-            self.logger.error(f"[API_CALL:{request_id}] FAILED - Error in handle_stream: {str(e)}")
+            self.logger.error(f"Error in handle_stream: {str(e)}")
             raise
         finally:
             # Signal that streaming has finished
