@@ -24,11 +24,20 @@
           "type": "array"
         },
         "type": {
-          "enum": ["string", "number", "integer", "boolean", "object", "array"],
+          "enum": [
+            "string",
+            "number",
+            "integer",
+            "boolean",
+            "object",
+            "array"
+          ],
           "type": "string"
         }
       },
-      "required": ["type"],
+      "required": [
+        "type"
+      ],
       "type": "object"
     },
     "toolParameters": {
@@ -50,7 +59,11 @@
           "const": "object"
         }
       },
-      "required": ["type", "properties", "required"],
+      "required": [
+        "type",
+        "properties",
+        "required"
+      ],
       "type": "object"
     }
   },
@@ -69,16 +82,21 @@
       "description": "ID of the model that will generate the response (e.g. 'gpt-4o', 'gpt-4o-mini', 'claude-3-5-sonnet').",
       "type": "string"
     },
+    "temperature": {
+      "default": 0.1,
+      "maximum": 1.0,
+      "minimum": 0.0,
+      "type": "number"
+    },
     "response_format": {
       "default": "text",
       "description": "Response format type ('text', 'json_object', or 'json_schema').",
-      "enum": ["text", "json_object", "json_schema"],
+      "enum": [
+        "text",
+        "json_object",
+        "json_schema"
+      ],
       "type": "string"
-    },
-    "stream_response": {
-      "default": true,
-      "description": "Enable streaming response.",
-      "type": "boolean"
     },
     "record_name": {
       "default": "Standalone Execution",
@@ -95,11 +113,6 @@
       "type": "object",
       "additionalProperties": true
     },
-    "output_variable": {
-      "default": "prompt_result",
-      "description": "Name of the output variable for the step result.",
-      "type": "string"
-    },
     "step_name": {
       "default": "Prompt 1",
       "description": "Name of the step in the flow.",
@@ -108,7 +121,10 @@
     "record_mode": {
       "default": "virtual",
       "description": "Record mode (virtual or persistent).",
-      "enum": ["virtual", "persistent"],
+      "enum": [
+        "virtual",
+        "persistent"
+      ],
       "type": "string"
     },
     "flow_name": {
@@ -124,55 +140,11 @@
     "flow_mode": {
       "default": "virtual",
       "description": "Flow mode (virtual or persistent).",
-      "enum": ["virtual", "persistent"],
+      "enum": [
+        "virtual",
+        "persistent"
+      ],
       "type": "string"
-    },
-    "runtime_tools": {
-      "description": "Optional runtime tools (external API integrations, custom functions, etc.).",
-      "items": {
-        "additionalProperties": false,
-        "properties": {
-          "name": {
-            "description": "Tool name.",
-            "type": "string"
-          },
-          "description": {
-            "description": "Tool description.",
-            "type": "string"
-          },
-          "tool_type": {
-            "description": "Type of tool (e.g., 'external', 'function').",
-            "enum": ["external", "function"],
-            "type": "string"
-          },
-          "parameters_schema": {
-            "$ref": "#/definitions/toolParameters"
-          },
-          "config": {
-            "additionalProperties": true,
-            "description": "Tool configuration (URL, method, headers, etc.).",
-            "properties": {
-              "url": {
-                "type": "string"
-              },
-              "method": {
-                "enum": ["GET", "POST", "PUT", "DELETE"],
-                "type": "string"
-              },
-              "headers": {
-                "additionalProperties": {
-                  "type": "string"
-                },
-                "type": "object"
-              }
-            },
-            "type": "object"
-          }
-        },
-        "required": ["name", "description", "tool_type", "parameters_schema"],
-        "type": "object"
-      },
-      "type": "array"
     },
     "max_tool_calls": {
       "default": 5,
@@ -182,7 +154,11 @@
     "tool_call_strategy": {
       "default": "auto",
       "description": "Strategy for tool calling ('auto', 'required', 'none').",
-      "enum": ["auto", "required", "none"],
+      "enum": [
+        "auto",
+        "required",
+        "none"
+      ],
       "type": "string"
     },
     "mcp_proxy": {
@@ -212,7 +188,10 @@
           }
         }
       },
-      "required": ["base_url", "headers"]
+      "required": [
+        "base_url",
+        "headers"
+      ]
     },
     "tool_ids": {
       "description": "Array of built-in tool IDs to enable (e.g., 'builtin:anthropic_web_search').",
@@ -231,7 +210,10 @@
       "default": []
     }
   },
-  "required": ["api_key"],
+  "required": [
+    "api_key",
+    "model"
+  ],
   "title": "Travrse AI Configuration Schema",
   "type": "object"
 }
