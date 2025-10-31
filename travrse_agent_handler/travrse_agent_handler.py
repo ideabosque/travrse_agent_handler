@@ -12,8 +12,8 @@ from decimal import Decimal
 from queue import Queue
 from typing import Any, Dict, List, Optional
 
+import httpx
 import pendulum
-import requests
 
 from ai_agent_handler import AIAgentEventHandler
 from silvaengine_utility import Utility
@@ -71,6 +71,23 @@ class TravrseEventHandler(AIAgentEventHandler):
             "Content-Type": "application/json",
             "Authorization": f"Bearer {self.api_key}",
         }
+
+        # Initialize httpx client with HTTP/2 support
+        self.http_client = httpx.Client(
+            http2=True,
+            timeout=120.0,  # 2 minute timeout
+            follow_redirects=True,
+        )
+
+    def __del__(self) -> None:
+        """
+        Cleanup method to ensure httpx client is properly closed
+        """
+        if hasattr(self, "http_client"):
+            try:
+                self.http_client.close()
+            except Exception:
+                pass  # Ignore errors during cleanup
 
     def _get_elapsed_time(self) -> float:
         """
@@ -218,19 +235,45 @@ class TravrseEventHandler(AIAgentEventHandler):
             # Make API request
 
             # stream parameter must match stream_response in payload for proper handling
-            response = requests.post(
-                self.api_url,
-                headers=self.headers,
-                data=json.dumps(payload),
-                stream=stream,
-                timeout=120,  # 2 minute timeout
-            )
-
-            if response.status_code != 200:
-                error_text = response.text[:500] if response.text else "No error message"
-                raise Exception(
-                    f"API request failed with status {response.status_code}: {error_text}"
+            if stream:
+                # Use streaming for real-time responses
+                stream_context = self.http_client.stream(
+                    "POST",
+                    self.api_url,
+                    headers=self.headers,
+                    content=Utility.json_dumps(payload),
                 )
+                # Enter the stream context
+                response = stream_context.__enter__()
+
+                # Store the stream context on the response for later cleanup
+                response._stream_context = stream_context
+
+                # For streaming responses, only check status_code (don't access .text as it closes the stream)
+                if response.status_code != 200:
+                    # Close the stream properly before raising
+                    try:
+                        stream_context.__exit__(None, None, None)
+                    except Exception:
+                        pass
+                    raise Exception(
+                        f"API streaming request failed with status {response.status_code}"
+                    )
+            else:
+                # Use regular request for non-streaming
+                response = self.http_client.post(
+                    self.api_url,
+                    headers=self.headers,
+                    content=Utility.json_dumps(payload),
+                )
+
+                if response.status_code != 200:
+                    error_text = (
+                        response.text[:500] if response.text else "No error message"
+                    )
+                    raise Exception(
+                        f"API request failed with status {response.status_code}: {error_text}"
+                    )
 
             if self.enable_timeline_log and self.logger.isEnabledFor(logging.INFO):
                 invoke_end = pendulum.now("UTC")
@@ -341,7 +384,7 @@ class TravrseEventHandler(AIAgentEventHandler):
 
     def handle_response(
         self,
-        response: requests.Response,
+        response: httpx.Response,
         input_messages: List[Dict[str, Any]],
         retry_count: int = 0,
     ) -> None:
@@ -356,7 +399,9 @@ class TravrseEventHandler(AIAgentEventHandler):
         MAX_RETRIES = 3
 
         if retry_count >= MAX_RETRIES:
-            error_msg = f"Maximum retry limit ({MAX_RETRIES}) exceeded for empty responses"
+            error_msg = (
+                f"Maximum retry limit ({MAX_RETRIES}) exceeded for empty responses"
+            )
             self.logger.error(error_msg)
             raise Exception(error_msg)
 
@@ -393,7 +438,7 @@ class TravrseEventHandler(AIAgentEventHandler):
 
     def handle_stream(
         self,
-        response: requests.Response,
+        response: httpx.Response,
         input_messages: List[Dict[str, Any]],
         stream_event: threading.Event = None,
         retry_count: int = 0,
@@ -444,12 +489,12 @@ class TravrseEventHandler(AIAgentEventHandler):
             incomplete_line_buffer = ""  # Buffer for incomplete JSON lines
             line_count = 0
 
-            for line in response.iter_lines(decode_unicode=True, chunk_size=None):
+            for line in response.iter_lines():
                 line_count += 1
                 if not line:
                     continue
 
-                # iter_lines with decode_unicode=True returns strings, not bytes
+                # httpx iter_lines returns strings, not bytes
                 line_str = (
                     line.strip()
                     if isinstance(line, str)
@@ -474,7 +519,7 @@ class TravrseEventHandler(AIAgentEventHandler):
 
                 try:
                     # Try to parse the complete line as JSON
-                    chunk_data = json.loads(full_line)
+                    chunk_data = Utility.json_loads(full_line)
                     # Success - clear the buffer
                     incomplete_line_buffer = ""
                     chunk_type = chunk_data.get("type")
@@ -583,7 +628,9 @@ class TravrseEventHandler(AIAgentEventHandler):
                 if retry_count >= MAX_RETRIES:
                     # Set valid final_output to prevent assertion error
                     timestamp = pendulum.now("UTC").int_timestamp
-                    error_content = "Error: Maximum retry limit exceeded - empty stream from model"
+                    error_content = (
+                        "Error: Maximum retry limit exceeded - empty stream from model"
+                    )
 
                     # Send stream notification to user
                     self.send_data_to_stream(
@@ -599,7 +646,9 @@ class TravrseEventHandler(AIAgentEventHandler):
                     )
 
                     self.final_output = {
-                        "message_id": message_id if message_id else f"msg-error-{timestamp}",
+                        "message_id": (
+                            message_id if message_id else f"msg-error-{timestamp}"
+                        ),
                         "role": "assistant",
                         "content": error_content,
                     }
@@ -662,6 +711,13 @@ class TravrseEventHandler(AIAgentEventHandler):
             self.logger.error(f"Error in handle_stream: {str(e)}")
             raise
         finally:
+            # Close the stream if it's an httpx streaming response
+            if hasattr(response, "_stream_context"):
+                try:
+                    response._stream_context.__exit__(None, None, None)
+                except Exception:
+                    pass  # Ignore errors during stream cleanup
+
             # Signal that streaming has finished
             if stream_event:
                 stream_event.set()
