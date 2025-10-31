@@ -211,22 +211,56 @@ class TravrseEventHandler(AIAgentEventHandler):
             payload = self._build_travrse_payload(input_messages)
             payload["options"]["stream_response"] = stream
 
+            # Generate unique request ID for tracking
+            request_id = f"req-{uuid.uuid4().hex[:12]}"
+
+            # ===== API CALL TRACKING: Request Details =====
+            self.logger.info(
+                f"[API_CALL] Request ID: {request_id} | "
+                f"URL: {self.api_url} | "
+                f"Stream: {stream} | "
+                f"Model: {payload['flow']['steps'][0]['config'].get('model')}"
+            )
+
             # Validate payload has required fields
             if not payload.get("messages"):
-                self.logger.warning("[invoke_model] No messages in payload")
+                self.logger.warning(f"[API_CALL:{request_id}] No messages in payload")
             elif not any(msg.get("content") for msg in payload.get("messages", [])):
-                self.logger.warning("[invoke_model] All messages have empty content")
+                self.logger.warning(f"[API_CALL:{request_id}] All messages have empty content")
+
+            # Log message summary
+            message_summary = []
+            for i, msg in enumerate(payload.get("messages", [])):
+                role = msg.get("role", "unknown")
+                content_length = len(msg.get("content", ""))
+                message_summary.append(f"{role}:{content_length}chars")
+
+            self.logger.info(
+                f"[API_CALL:{request_id}] Messages: [{', '.join(message_summary)}]"
+            )
+
+            # Log tools configuration
+            step_config = payload['flow']['steps'][0]['config']
+            if "tools" in step_config and step_config["tools"]:
+                tool_ids = step_config["tools"].get("tool_ids", [])
+                runtime_tools = step_config["tools"].get("runtime_tools", [])
+                runtime_tool_names = [t.get("name", "unknown") for t in runtime_tools]
+
+                self.logger.info(
+                    f"[API_CALL:{request_id}] Tools - "
+                    f"Built-in IDs: {tool_ids}, "
+                    f"Runtime: {runtime_tool_names}, "
+                    f"Max calls: {step_config['tools'].get('max_tool_calls', 0)}, "
+                    f"Strategy: {step_config['tools'].get('tool_call_strategy', 'auto')}"
+                )
 
             if self.logger.isEnabledFor(logging.DEBUG):
                 self.logger.debug(
-                    f"[invoke_model] Payload: {Utility.json_dumps(payload)}"
-                )
-            elif self.logger.isEnabledFor(logging.INFO):
-                self.logger.info(
-                    f"[invoke_model] Sending {len(payload.get('messages', []))} messages, stream={stream}"
+                    f"[API_CALL:{request_id}] Full payload: {Utility.json_dumps(payload)}"
                 )
 
             # Make API request
+            self.logger.info(f"[API_CALL:{request_id}] Sending request...")
             # stream parameter must match stream_response in payload for proper handling
             response = requests.post(
                 self.api_url,
