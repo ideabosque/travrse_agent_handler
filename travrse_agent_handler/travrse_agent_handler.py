@@ -211,8 +211,8 @@ class TravrseEventHandler(AIAgentEventHandler):
             payload = self._build_travrse_payload(input_messages)
             payload["options"]["stream_response"] = stream
 
-            if self.logger.isEnabledFor(logging.INFO):
-                self.logger.info(
+            if self.logger.isEnabledFor(logging.DEBUG):
+                self.logger.debug(
                     f"[invoke_model] Payload: {Utility.json_dumps(payload)}"
                 )
 
