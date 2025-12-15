@@ -16,7 +16,8 @@ import httpx
 import pendulum
 
 from ai_agent_handler import AIAgentEventHandler
-from silvaengine_utility import Utility
+from silvaengine_utility.performance_monitor import performance_monitor
+from silvaengine_utility.serializer import Serializer
 
 
 # ----------------------------
@@ -241,7 +242,7 @@ class TravrseEventHandler(AIAgentEventHandler):
                     "POST",
                     self.api_url,
                     headers=self.headers,
-                    content=Utility.json_dumps(payload),
+                    content=Serializer.json_dumps(payload),
                 )
                 # Enter the stream context
                 response = stream_context.__enter__()
@@ -264,7 +265,7 @@ class TravrseEventHandler(AIAgentEventHandler):
                 response = self.http_client.post(
                     self.api_url,
                     headers=self.headers,
-                    content=Utility.json_dumps(payload),
+                    content=Serializer.json_dumps(payload),
                 )
 
                 if response.status_code != 200:
@@ -289,7 +290,7 @@ class TravrseEventHandler(AIAgentEventHandler):
             self.logger.error(f"Error invoking model: {str(e)}")
             raise Exception(f"Failed to invoke model: {str(e)}")
 
-    @Utility.performance_monitor.monitor_operation(operation_name="Travrse")
+    @performance_monitor.monitor_operation(operation_name="Travrse")
     def ask_model(
         self,
         input_messages: List[Dict[str, Any]],
@@ -519,7 +520,7 @@ class TravrseEventHandler(AIAgentEventHandler):
 
                 try:
                     # Try to parse the complete line as JSON
-                    chunk_data = Utility.json_loads(full_line)
+                    chunk_data = Serializer.json_loads(full_line)
                     # Success - clear the buffer
                     incomplete_line_buffer = ""
                     chunk_type = chunk_data.get("type")
