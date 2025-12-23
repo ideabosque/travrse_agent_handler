@@ -7,10 +7,11 @@ __author__ = "bibow"
 import json
 import logging
 import threading
+import traceback
 import uuid
 from decimal import Decimal
 from queue import Queue
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
 import pendulum
@@ -155,8 +156,8 @@ class TravrseEventHandler(AIAgentEventHandler):
             for tool in self.model_setting["tools"]:
                 if tool["name"] not in self.model_setting.get("enabled_tools", []):
                     continue
-                url = tool["config"]["url"]
-                tool["config"]["url"] = url.format(endpoint_id=self.endpoint_id)
+                # url = tool["config"]["url"]
+                # tool["config"]["url"] = url.format(endpoint_id=self.endpoint_id)
                 runtime_tools.append(tool)
             step_config["tools"] = dict(
                 step_config["tools"],
@@ -228,9 +229,14 @@ class TravrseEventHandler(AIAgentEventHandler):
 
             input_messages = kwargs.get("input_messages", [])
             stream = kwargs.get("stream", False)
+            api_url = self.api_url
 
             # Build Travrse AI payload
-            payload = self._build_travrse_payload(input_messages)
+            if kwargs.get("payload"):
+                payload = kwargs["payload"]
+                api_url = f"{api_url}/resume"
+            else:
+                payload = self._build_travrse_payload(input_messages)
             payload["options"]["stream_response"] = stream
 
             # Make API request
@@ -240,7 +246,7 @@ class TravrseEventHandler(AIAgentEventHandler):
                 # Use streaming for real-time responses
                 stream_context = self.http_client.stream(
                     "POST",
-                    self.api_url,
+                    api_url,
                     headers=self.headers,
                     content=Serializer.json_dumps(payload),
                 )
@@ -263,7 +269,7 @@ class TravrseEventHandler(AIAgentEventHandler):
             else:
                 # Use regular request for non-streaming
                 response = self.http_client.post(
-                    self.api_url,
+                    api_url,
                     headers=self.headers,
                     content=Serializer.json_dumps(payload),
                 )
@@ -383,6 +389,303 @@ class TravrseEventHandler(AIAgentEventHandler):
                     )
                 self._global_start_time = None
 
+    def handle_function_call(
+        self, tool_call: Dict[str, Any], input_messages: List[Dict[str, Any]]
+    ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+        """
+        Processes and executes tool/function calls from model responses
+
+        Args:
+            tool_call: Tool call data from model response (Ollama format)
+
+        Returns:
+            Dict containing function execution results in Ollama's tool message format
+
+        Raises:
+            ValueError: For invalid tool calls
+            Exception: For function execution failures
+        """
+        # Track function call timing
+        function_call_start = pendulum.now("UTC")
+
+        function_call_data = {
+            "id": tool_call["tool_id"],
+            "arguments": tool_call.get("parameters", {}),
+            "type": "function",
+            "name": tool_call["tool_name"],
+        }
+
+        try:
+            function_name = function_call_data["name"]
+
+            if self.logger.isEnabledFor(logging.INFO):
+                self.logger.info(
+                    f"[handle_function_call] Starting function call recording for {function_name}"
+                )
+
+            self._record_function_call_start(function_call_data)
+
+            if self.logger.isEnabledFor(logging.INFO):
+                self.logger.info(
+                    f"[handle_function_call] Processing arguments for function {function_name}"
+                )
+
+            arguments = self._process_function_arguments(function_call_data)
+
+            if self.logger.isEnabledFor(logging.INFO):
+                self.logger.info(
+                    f"[handle_function_call] Executing function {function_name} with arguments {arguments}"
+                )
+
+            function_output = self._execute_function(function_call_data, arguments)
+
+            # Update conversation history
+            if self.logger.isEnabledFor(logging.INFO):
+                self.logger.info(
+                    f"[handle_function_call][{function_name}] Updating conversation history"
+                )
+
+            self._update_conversation_history(
+                function_call_data, function_output, input_messages
+            )
+
+            if self._run is None:
+                self._short_term_memory.append(
+                    {
+                        "message": {
+                            "role": self.agent["tool_call_role"],
+                            "content": Serializer.json_dumps(
+                                {
+                                    "tool": {
+                                        "tool_call_id": function_call_data["id"],
+                                        "tool_type": function_call_data["type"],
+                                        "name": function_call_data["name"],
+                                        "arguments": arguments,
+                                    },
+                                    "output": function_output,
+                                }
+                            ),
+                        },
+                        "created_at": pendulum.now("UTC"),
+                    }
+                )
+
+            if self.enable_timeline_log and self.logger.isEnabledFor(logging.INFO):
+                # Log function call execution time
+                function_call_end = pendulum.now("UTC")
+                function_call_time = (
+                    function_call_end - function_call_start
+                ).total_seconds() * 1000
+                elapsed = self._get_elapsed_time()
+                self.logger.info(
+                    f"[TIMELINE] T+{elapsed:.2f}ms: Function '{function_call_data['name']}' complete (took {function_call_time:.2f}ms)"
+                )
+
+            payload = {
+                "execution_id": f"{tool_call["execution_id"]}",
+                "tool_outputs": {
+                    tool_call["tool_name"]: {
+                        "result": Serializer.json_dumps(function_output)
+                    }
+                },
+                "options": {},
+            }
+
+            return input_messages, payload
+
+        except Exception as e:
+            self.logger.error(f"Error in handle_function_call: {e}")
+            raise
+
+    def _record_function_call_start(self, function_call_data: Dict[str, Any]) -> None:
+        """
+        Records initial function call metadata to storage
+
+        Args:
+            function_call_data: Function call details to record
+        """
+        self.invoke_async_funct(
+            "async_insert_update_tool_call",
+            **{
+                "tool_call_id": function_call_data["id"],
+                "tool_type": function_call_data["type"],
+                "name": function_call_data["name"],
+            },
+        )
+
+    def _process_function_arguments(
+        self, function_call_data: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """
+        Parses and validates function arguments from tool call
+
+        Args:
+            function_call_data: Raw function call data
+
+        Returns:
+            Processed arguments dictionary
+
+        Raises:
+            ValueError: If argument parsing fails
+        """
+        try:
+            arguments = function_call_data.get("arguments", {})
+
+            return arguments
+
+        except Exception as e:
+            log = traceback.format_exc()
+            # Batch async call with error details (performance optimization)
+            self.invoke_async_funct(
+                "async_insert_update_tool_call",
+                **{
+                    "tool_call_id": function_call_data["id"],
+                    "arguments": function_call_data.get("arguments", "{}"),
+                    "status": "failed",
+                    "notes": log,
+                },
+            )
+            if self.logger.isEnabledFor(logging.ERROR):
+                self.logger.error("Error parsing function arguments: %s", e)
+            raise ValueError(f"Failed to parse function arguments: {e}")
+
+    def _execute_function(
+        self, function_call_data: Dict[str, Any], arguments: Dict[str, Any]
+    ) -> Any:
+        """
+        Executes the requested function and handles results/errors
+
+        Args:
+            function_call_data: Function metadata
+            arguments: Processed function arguments
+
+        Returns:
+            Function execution output
+
+        Raises:
+            ValueError: For unsupported functions
+        """
+        agent_function = self.get_function(function_call_data["name"])
+        if not agent_function:
+            raise ValueError(
+                f"Unsupported function requested: {function_call_data['name']}"
+            )
+
+        try:
+            # Cache JSON serialization to avoid duplicate work (performance optimization)
+            arguments_json = Serializer.json_dumps(arguments)
+
+            self.invoke_async_funct(
+                "async_insert_update_tool_call",
+                **{
+                    "tool_call_id": function_call_data["id"],
+                    "arguments": arguments_json,
+                    "status": "in_progress",
+                },
+            )
+
+            # Track actual function execution time
+            function_exec_start = pendulum.now("UTC")
+            function_output = agent_function(**arguments)
+
+            if self.enable_timeline_log and self.logger.isEnabledFor(logging.INFO):
+                function_exec_end = pendulum.now("UTC")
+                function_exec_time = (
+                    function_exec_end - function_exec_start
+                ).total_seconds() * 1000
+                elapsed = self._get_elapsed_time()
+                self.logger.info(
+                    f"[TIMELINE] T+{elapsed:.2f}ms: Function '{function_call_data['name']}' executed (took {function_exec_time:.2f}ms)"
+                )
+
+            self.invoke_async_funct(
+                "async_insert_update_tool_call",
+                **{
+                    "tool_call_id": function_call_data["id"],
+                    "content": Serializer.json_dumps(function_output),
+                    "status": "completed",
+                },
+            )
+            return function_output
+
+        except Exception as e:
+            log = traceback.format_exc()
+            # Cache JSON serialization to avoid duplicate work (performance optimization)
+            arguments_json = Serializer.json_dumps(arguments)
+            self.invoke_async_funct(
+                "async_insert_update_tool_call",
+                **{
+                    "tool_call_id": function_call_data["id"],
+                    "arguments": arguments_json,
+                    "status": "failed",
+                    "notes": log,
+                },
+            )
+            return f"Function execution failed: {e}"
+
+    def _update_conversation_history(
+        self,
+        function_call_data: Dict[str, Any],
+        function_output: Any,
+        input_messages: List[Dict[str, Any]],
+    ) -> None:
+        """
+        Updates the conversation history with function call results.
+        Formats and appends function output as a user message.
+
+        Args:
+            function_call_data: Metadata about the executed function
+            function_output: Result from function execution
+            input_messages: Current conversation history to update
+        """
+
+        # Return in Ollama's tool message format
+        # Append tool result in Ollama format with "tool" role
+        # Ensure content is a JSON string
+        content = (
+            Serializer.json_dumps(function_output)
+            if not isinstance(function_output, str)
+            else function_output
+        )
+        input_messages.append(
+            {
+                "role": self.agent["tool_call_role"],
+                "content": content,
+                "tool_name": function_call_data["name"],
+                "tool_id": function_call_data["id"],
+            }
+        )
+
+    def _extract_final_outputs(self, text: str) -> List[str]:
+        """
+        Extract final assistant outputs from an SSE-style BYTES payload.
+        Returns a list of final responses (one per step_complete).
+        """
+
+        final_outputs = []
+
+        # 2️⃣ Split SSE events
+        for block in text.split("\n\n"):
+            block = block.strip()
+            if not block.startswith("data:"):
+                continue
+
+            payload = block[len("data:") :].strip()
+
+            # 3️⃣ Parse JSON safely
+            try:
+                event = Serializer.json_loads(payload)
+            except json.JSONDecodeError:
+                continue
+
+            # 4️⃣ Extract authoritative result
+            if event.get("type") == "step_complete":
+                response = event.get("result", {}).get("response")
+                if response:
+                    final_outputs.append(response)
+
+        return final_outputs
+
     def handle_response(
         self,
         response: httpx.Response,
@@ -408,10 +711,61 @@ class TravrseEventHandler(AIAgentEventHandler):
 
         try:
             # Travrse AI returns plain text response directly
-            response_text = response.text
+
+            content = None
+            response_content = response.content.decode("utf-8", errors="ignore")
+            if "data: " in response_content:
+                final_outputs = self._extract_final_outputs(response_content)
+                content = final_outputs[-1]
+            else:
+                response_content = Serializer.json_loads(response_content)
+
+            if isinstance(response_content, dict):
+                if not response_content["success"]:
+                    raise Exception(
+                        f"API request failed with error: {response_content['error']}"
+                    )
+
+                if response_content["status"] == "paused":
+                    if response_content.get("paused_reason") is None:
+                        raise Exception("API request paused without reason")
+
+                    paused_reason = response_content["paused_reason"]
+                    tool_call = {
+                        k: v
+                        for k, v in paused_reason.items()
+                        if k in ["execution_id", "tool_id", "tool_name", "parameters"]
+                    }
+
+                    input_messages, payload = self.handle_function_call(
+                        tool_call, input_messages
+                    )
+
+                    # Recurse with fresh response (reset retry count)
+                    response = self.invoke_model(
+                        **{
+                            "input_messages": input_messages,
+                            "payload": payload,
+                            "stream": False,
+                        }
+                    )
+                    self.handle_response(response, input_messages, retry_count=0)
+                    return
+
+                content = None
+                if response_content["status"] == "completed":
+                    step_complete = next(
+                        (
+                            event
+                            for event in response_content["events"]
+                            if event["type"] == "step_complete"
+                        ),
+                        None,
+                    )
+                    content = step_complete["result"]["response"]
 
             # Parse response
-            if not response_text or not response_text.strip():
+            if not content or not content.strip():
                 self.logger.warning(
                     f"Received empty response from model, retrying (attempt {retry_count + 1}/{MAX_RETRIES})..."
                 )
@@ -430,7 +784,7 @@ class TravrseEventHandler(AIAgentEventHandler):
             self.final_output = {
                 "message_id": message_id,
                 "role": "assistant",
-                "content": response_text,
+                "content": content,
             }
 
         except Exception as e:
@@ -568,7 +922,10 @@ class TravrseEventHandler(AIAgentEventHandler):
                             index, accumulated_partial_text = self.process_text_content(
                                 index, accumulated_partial_text, output_format
                             )
-
+                    elif chunk_type == "flow_start":
+                        continue  # Skip flow_start chunks
+                    elif chunk_type == "step_start":
+                        continue  # Skip flow_start chunks
                     elif chunk_type == "step_complete":
                         # Step completed - may contain full response
                         step_result = chunk_data.get("result", {})
@@ -585,6 +942,34 @@ class TravrseEventHandler(AIAgentEventHandler):
                             "successful_steps": chunk_data.get("successfulSteps"),
                             "failed_steps": chunk_data.get("failedSteps"),
                         }
+                    elif chunk_type == "tool_start":
+                        continue
+                    elif chunk_type == "step_waiting_local":
+                        tool_call = {
+                            "execution_id": chunk_data.get("executionId"),
+                            "tool_id": chunk_data.get("toolId"),
+                            "tool_name": chunk_data.get("toolName"),
+                            "parameters": chunk_data.get("parameters"),
+                        }
+
+                        input_messages, payload = self.handle_function_call(
+                            tool_call, input_messages
+                        )
+
+                        # Recurse with fresh response (reset retry count)
+                        response = self.invoke_model(
+                            **{
+                                "input_messages": input_messages,
+                                "payload": payload,
+                                "stream": True,
+                            }
+                        )
+                        self.handle_stream(response, input_messages, retry_count=0)
+                        return
+                    else:
+                        raise Exception(
+                            f"Unknown chunk type: {chunk_type} with {Serializer.json_dumps(chunk_data)}."
+                        )
 
                 except json.JSONDecodeError as e:
                     # Handle incomplete JSON - might be truncated across multiple lines
