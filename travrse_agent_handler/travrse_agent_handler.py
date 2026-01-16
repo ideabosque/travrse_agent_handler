@@ -15,7 +15,6 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
 import pendulum
-
 from ai_agent_handler import AIAgentEventHandler
 from silvaengine_utility.performance_monitor import performance_monitor
 from silvaengine_utility.serializer import Serializer
@@ -482,7 +481,7 @@ class TravrseEventHandler(AIAgentEventHandler):
                 )
 
             payload = {
-                "execution_id": f"{tool_call["execution_id"]}",
+                "execution_id": f"{tool_call['execution_id']}",
                 "tool_outputs": {
                     tool_call["tool_name"]: {
                         "result": Serializer.json_dumps(function_output)
