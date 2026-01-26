@@ -226,7 +226,6 @@ class TravrseEventHandler(AIAgentEventHandler):
         try:
             invoke_start = pendulum.now("UTC")
 
-            input_messages = kwargs.get("input_messages", [])
             stream = kwargs.get("stream", False)
             api_url = self.api_url
 
@@ -235,6 +234,7 @@ class TravrseEventHandler(AIAgentEventHandler):
                 payload = kwargs["payload"]
                 api_url = f"{api_url}/resume"
             else:
+                input_messages = kwargs.get("input_messages", [])
                 payload = self._build_travrse_payload(input_messages)
             payload["options"]["stream_response"] = stream
 
@@ -370,9 +370,9 @@ class TravrseEventHandler(AIAgentEventHandler):
             if stream:
                 queue.put({"name": "run_id", "value": run_id})
                 self.handle_stream(response, input_messages, stream_event=stream_event)
-                return None
+            else:
+                self.handle_response(response, input_messages)
 
-            self.handle_response(response, input_messages)
             return run_id
         except Exception as e:
             self.logger.error(f"Error in ask_model: {str(e)}")
@@ -390,7 +390,7 @@ class TravrseEventHandler(AIAgentEventHandler):
 
     def handle_function_call(
         self, tool_call: Dict[str, Any], input_messages: List[Dict[str, Any]]
-    ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    ) -> Dict[str, Any]:
         """
         Processes and executes tool/function calls from model responses
 
@@ -481,7 +481,8 @@ class TravrseEventHandler(AIAgentEventHandler):
                 )
 
             payload = {
-                "execution_id": f"{tool_call['execution_id']}",
+                "execution_id": f"{tool_call["execution_id"]}",
+                "messages": input_messages,
                 "tool_outputs": {
                     tool_call["tool_name"]: {
                         "result": Serializer.json_dumps(function_output)
@@ -490,7 +491,7 @@ class TravrseEventHandler(AIAgentEventHandler):
                 "options": {},
             }
 
-            return input_messages, payload
+            return payload
 
         except Exception as e:
             self.logger.error(f"Error in handle_function_call: {e}")
@@ -736,19 +737,16 @@ class TravrseEventHandler(AIAgentEventHandler):
                         if k in ["execution_id", "tool_id", "tool_name", "parameters"]
                     }
 
-                    input_messages, payload = self.handle_function_call(
-                        tool_call, input_messages
-                    )
+                    payload = self.handle_function_call(tool_call, input_messages)
 
                     # Recurse with fresh response (reset retry count)
                     response = self.invoke_model(
                         **{
-                            "input_messages": input_messages,
                             "payload": payload,
                             "stream": False,
                         }
                     )
-                    self.handle_response(response, input_messages, retry_count=0)
+                    self.handle_response(response, payload["messages"], retry_count=0)
                     return
 
                 content = None
@@ -951,20 +949,19 @@ class TravrseEventHandler(AIAgentEventHandler):
                             "parameters": chunk_data.get("parameters"),
                         }
 
-                        input_messages, payload = self.handle_function_call(
-                            tool_call, input_messages
-                        )
+                        payload = self.handle_function_call(tool_call, input_messages)
 
                         # Recurse with fresh response (reset retry count)
                         response = self.invoke_model(
                             **{
-                                "input_messages": input_messages,
                                 "payload": payload,
                                 "stream": True,
                             }
                         )
-                        self.handle_stream(response, input_messages, retry_count=0)
+                        self.handle_stream(response, payload["messages"], retry_count=0)
                         return
+                    elif chunk_type == "tool_complete":
+                        continue
                     else:
                         raise Exception(
                             f"Unknown chunk type: {chunk_type} with {Serializer.json_dumps(chunk_data)}."
