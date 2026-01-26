@@ -15,7 +15,6 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
 import pendulum
-
 from ai_agent_handler import AIAgentEventHandler
 from silvaengine_utility.performance_monitor import performance_monitor
 from silvaengine_utility.serializer import Serializer
