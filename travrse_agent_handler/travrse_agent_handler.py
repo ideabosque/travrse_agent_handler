@@ -15,6 +15,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
 import pendulum
+
 from ai_agent_handler import AIAgentEventHandler
 from silvaengine_utility.performance_monitor import performance_monitor
 from silvaengine_utility.serializer import Serializer
@@ -51,6 +52,18 @@ class TravrseEventHandler(AIAgentEventHandler):
 
         # Enable timeline logging (default: False)
         self.enable_timeline_log = setting.get("enable_timeline_log", False)
+
+        if "enabled_tools" in self.agent["configuration"]:
+            # Add tools if available - matching example.py structure
+            enabled_tools = []
+            if "tools" in self.agent["configuration"]:
+                for tool in self.agent["configuration"]["tools"]:
+                    if tool["name"] not in self.agent["configuration"].get(
+                        "enabled_tools", []
+                    ):
+                        continue
+                    enabled_tools.append(tool)
+            self.agent["configuration"]["tools"] = enabled_tools
 
         # Convert Decimal to float once during initialization (performance optimization)
         self.model_setting = {
@@ -152,12 +165,6 @@ class TravrseEventHandler(AIAgentEventHandler):
         # Add tools if available - matching example.py structure
         runtime_tools = []
         if "tools" in self.model_setting:
-            for tool in self.model_setting["tools"]:
-                if tool["name"] not in self.model_setting.get("enabled_tools", []):
-                    continue
-                # url = tool["config"]["url"]
-                # tool["config"]["url"] = url.format(endpoint_id=self.endpoint_id)
-                runtime_tools.append(tool)
             step_config["tools"] = dict(
                 step_config["tools"],
                 **{
